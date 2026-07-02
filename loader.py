@@ -23,4 +23,5 @@ MEMORY_DB = {
     },
     "temp_music": {}
 }
+MEMORY_DB = {"temp_music": {}}
 
