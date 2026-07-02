@@ -3,203 +3,289 @@ import logging
 import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from google import genai
 
-# Loglarni yoqamiz
+# Loglarni sozlash
 logging.basicConfig(level=logging.INFO)
 
-# Muhit o'zgaruvchilarini olish (Render Envs)
+# Muhit o'zgaruvchilari (Render yoki .env uchun)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNELS")      # Kinolar turgan va majburiy obuna kanali ID'si
-GEMINI_KEY = os.getenv("GEMINI_API_KEY") # Google AI API kaliti
+PUBLIC_CHANNEL = os.getenv("PUBLIC_CHANNEL")
+SERVER_CHANNEL = os.getenv("SERVER_CHANNEL")
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))  # O'zingizning Telegram ID'ingizni kiriting
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 
-# Gemini AI Klientini ishga tushiramiz
-ai_client = None
-if GEMINI_KEY:
-    ai_client = genai.Client(api_key=GEMINI_KEY)
+# Gemini AI Klienti
+ai_client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
-# Foydalanuvchining obunasini tekshirish funksiyasi
+# --- DINAMIK BAZA (Xotirada saqlash uchun sodda DB model) ---
+MEMORY_DB = {
+    "users": {},          # {user_id: {"lang": "uz"}}
+    "buttons": {          # Dinamik tugmalar ro'yxati
+        "uz": ["🎬 Kino Qidirish", "🤖 Gemini AI Chat", "🎵 Musiqa Markazi"],
+        "en": ["🎬 Search Movie", "🤖 Gemini AI Chat", "🎵 Music Center"],
+        "ru": ["🎬 Поиск Кино", "🤖 Gemini AI Chat", "🎵 Музыкальный Центр"]
+    },
+    "custom_responses": {} # {button_name: "Xabar matni"}
+}
+
+# FSM Davlatlari (Admin rejimlari uchun)
+class AdminStates(StatesGroup):
+    editing_buttons = State()
+    adding_button = State()
+    editing_button_props = State()
+    editing_messages = State()
+    adding_message_text = State()
+
+# --- YORDAMChI FUNKSIYALAR ---
 async def is_subscribed(user_id: int) -> bool:
-    if not CHANNEL_ID:
+    if not PUBLIC_CHANNEL: @MoviTimeUz
         return True
     try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        if member.status in ["member", "administrator", "creator"]:
-            return True
-        return False
+        member = await bot.get_chat_member(chat_id=PUBLIC_CHANNEL, user_id=user_id)
+        return member.status in ["member", "administrator", "creator"]
     except Exception as e:
-        logging.error(f"Obunani tekshirishda xato yuz berdi: {e}")
+        logging.error(f"Obunani tekshirishda xato: {e}")
         return False
 
-# /start komandasi va til/bosh menyu yuklanishi
+def get_user_lang(user_id: int) -> str:
+    return MEMORY_DB["users"].get(user_id, {}).get("lang", "uz")
+
+# 📱 USER MENYUSI (Dinamik tillar va tugmalar asosida shakllanadi)
+def get_user_reply_menu(user_id: int):
+    lang = get_user_lang(user_id)
+    builder = ReplyKeyboardBuilder()
+    buttons = MEMORY_DB["buttons"].get(lang, MEMORY_DB["buttons"]["uz"])
+    
+    for btn in buttons:
+        builder.button(text=btn)
+    
+    # Agar admin bo'lsa, pastdan boshqaruv tugmasini ko'rsatish
+    if user_id == ADMIN_ID:
+        builder.button(text="⚙️ Tugmalar muharriri")
+        builder.button(text="📝 Xabar tahrirlash")
+        
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
+
+# 🌐 MULTILANGUAGE KLAVIATURA (`6679.jpg` dagi kabi)
+def get_lang_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🇬🇧 English", callback_data="set_lang_en")
+    kb.button(text="🇷🇺 Русский", callback_data="set_lang_ru")
+    kb.button(text="🇺🇿 O'zbek", callback_data="set_lang_uz")
+    kb.adjust(1)
+    return kb.as_markup()
+
+# 🛠️ ADMIN VISUAL CONSTRUCTOR TUGMALARI (`6681.jpg` va `6682.jpg` dagi kabi)
+def get_admin_constructor_kb():
+    kb = InlineKeyboardBuilder()
+    # Navigatsiya o'qlari
+    kb.button(text="⬅️", callback_data="btn_left")
+    kb.button(text="🔼", callback_data="btn_up")
+    kb.button(text="🔽", callback_data="btn_down")
+    kb.button(text="➡️", callback_data="btn_right")
+    kb.button(text="*️⃣", callback_data="btn_star")
+    # Amal tugmalari
+    kb.button(text="➕ Tahrirlash", callback_data="btn_edit_prop")
+    kb.button(text="❌ O'chirish", callback_data="btn_delete")
+    kb.button(text="📋 Ko'chirish", callback_data="btn_copy")
+    kb.adjust(5, 3)
+    return kb.as_markup()
+
+def get_admin_reply_constructor():
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="➕ Tugma Qo'shish")
+    builder.button(text="🛑 Muharrirni to'xtatish")
+    builder.button(text="📝 Xabar muharriri")
+    builder.adjust(1, 2)
+    return builder.as_markup(resize_keyboard=True)
+
+# --- BUYRUQLAR VA KOD TIZIMI ---
+
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     user_id = message.from_user.id
-    
-    # Avval majburiy obunani tekshiramiz
+    if user_id not in MEMORY_DB["users"]:
+        MEMORY_DB["users"][user_id] = {"lang": "uz"}
+        
     if not await is_subscribed(user_id):
         kb = InlineKeyboardBuilder()
-        # Kanal havolasini formatlaymiz (-100123456789 -> c/123456789 yoki umumiy havola)
-        clean_channel = str(CHANNEL_ID).replace('-100', '')
-        kb.button(text="Kanalga a'zo bo'lish 🔐", url=f"https://t.me/c/{clean_channel}")
+        channel_url = f"https://t.me/{str(PUBLIC_CHANNEL).replace('@', '')}"
+        kb.button(text="Kanalga a'zo bo'lish 🔐", url=channel_url)
         kb.button(text="Tekshirish ✅", callback_data="check_subscription")
         kb.adjust(1)
-        
-        await message.answer(
-            "👋 Salom! Bot xizmatlaridan to'liq foydalanish uchun avval rasmiy kanalimizga a'zo bo'ling.",
-            reply_markup=kb.as_markup()
-        )
+        await message.answer("👋 Botdan foydalanish uchun kanalga a'zo bo'ling.", reply_markup=kb.as_markup())
         return
 
-    # Asosiy Menyu Interfeysi
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🎬 Kino Qidirish", callback_data="nav_cinema")
-    kb.button(text="🤖 Gemini AI Chat", callback_data="nav_ai")
-    kb.button(text="🎵 Musiqa Markazi", callback_data="nav_music")
-    kb.adjust(1)
-    
-    await message.answer(
-        f"✨ Xush kelibsiz, {message.from_user.full_name}!\n"
-        f"Quyidagi bo'limlardan birini tanlang va tizim imkoniyatlaridan daxshatli tarzda foydalaning:",
-        reply_markup=kb.as_markup()
+    # Til tanlash xabarini chiqarish (`6679.jpg` dagi kabi tekst va admin menyusi)
+    lang_text = (
+        "👋 **Welcome to the Menu Builder.**\n\n"
+        "You can change your language:\n"
+        "🇬🇧 English . . . . . . /langen\n"
+        "🇷🇺 Русский . . . . . . /langru\n"
+        "🇺🇿 O'zbek . . . . . . /languz\n\n"
+        "_(This message helps you build and control everything!)_"
     )
+    await message.answer(lang_text, reply_markup=get_lang_keyboard())
 
-# Obunani tekshirish tugmasi bosilganda
-@dp.callback_query(F.data == "check_subscription")
-async def check_sub_callback(callback: types.CallbackQuery):
-    if await is_subscribed(callback.from_user.id):
-        await callback.answer("Rahmat! Obuna tasdiqlandi. /start buyrug'ini bosing.", show_alert=True)
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-    else:
-        await callback.answer("Siz hali ko'rsatilgan kanalga obuna bo'lmadingiz! ❌", show_alert=True)
-
-# Bo'limlar navigatsiyasi
-@dp.callback_query(F.data.startswith("nav_"))
-async def navigation_callback(callback: types.CallbackQuery):
-    section = callback.data.split("_")[1]
+# Tilni o'zgartirish callback'lari
+@dp.callback_query(F.data.startswith("set_lang_"))
+async def set_language(callback: types.CallbackQuery):
+    lang = callback.data.split("_")[2]
+    user_id = callback.from_user.id
+    MEMORY_DB["users"][user_id] = {"lang": lang}
     
-    if section == "cinema":
-        await callback.message.answer("🎬 **MoviTime Tizimi**\n\nKino topish uchun o'sha kinoning kodini (raqamini) to'g'ridan-to'g'ri xabar qilib yuboring.")
-    elif section == "ai":
-        await callback.message.answer("🤖 **Gemini AI Chat**\n\nMenga xohlagan matnli savolingizni yozing yoki rasm chizdirish uchun matn boshiga `rasm:` so'zini qo'shib yozing.")
-    elif section == "music":
-        await callback.message.answer("🎵 **VK Music Uslubidagi Bo'lim**\n\nIzlayotgan qo'shig'ingiz yoki ijrochi nomini yozib yuboring.")
-    
-    await callback.answer()
+    lang_names = {"uz": "O'zbek", "en": "English", "ru": "Русский"}
+    await callback.answer(f"✓ Til {lang_names[lang]} tiliga o'girildi !", show_alert=False)
+    await callback.message.answer(f"🤖 Asosiy Menyu ({lang_names[lang]}):", reply_markup=get_user_reply_menu(user_id))
 
-# Kelayotgan barcha matnli xabarlarni qayta ishlash markazi
+# --- ⚙️ ADMIN TUGMALAR MUHARRIRI (VISUAL CONSTRUCTOR) ---
+
+@dp.message(F.text == "⚙️ Tugmalar muharriri", F.from_user.id == ADMIN_ID)
+async def admin_mode_start(message: types.Message, state: FSMContext):
+    await state.set_state(AdminStates.editing_buttons)
+    await message.answer("🔧 **Siz Tugmalarni Tahrirlash rejimidasisiz.**", reply_markup=get_admin_reply_constructor())
+    
+    # `6681.jpg` dagi kabi sozlamalar oynasi matni
+    settings_text = (
+        "🔧 **Tugmani tahrirlash:**\n\n"
+        "■ Tasodifiy xabar: 🟦 O'chiq\n"
+        "■ Faqat admin: 🟦 O'chiq\n"
+        "■ Yashirin: 🟦 O'chiq\n"
+        "■ Captcha: 🟦 O'chiq\n"
+        "■ Obuna (join): 🟦 O'chiq\n"
+        "■ Buyruq: ---\n"
+        "■ Shart: ---\n"
+        "■ Navigatsiya: 🟦 O'chiq\n"
+        "■ Shop: ---"
+    )
+    await message.answer(settings_text, reply_markup=get_admin_constructor_kb())
+
+@dp.message(F.text == "➕ Tugma Qo'shish", AdminStates.editing_buttons)
+async def add_button_prompt(message: types.Message, state: FSMContext):
+    await state.set_state(AdminStates.adding_button)
+    await message.answer("📝 Yangi tugma nomini kiriting:")
+
+@dp.message(AdminStates.adding_button)
+async def add_button_save(message: types.Message, state: FSMContext):
+    btn_name = message.text
+    lang = get_user_lang(message.from_user.id)
+    
+    if btn_name not in MEMORY_DB["buttons"][lang]:
+        MEMORY_DB["buttons"][lang].append(btn_name)
+        
+    await state.set_state(AdminStates.editing_buttons)
+    await message.answer(f"✅ '{btn_name}' tugmasi muvaffaqiyatli qo'shildi!", reply_markup=get_user_reply_menu(message.from_user.id))
+
+@dp.message(F.text == "🛑 Muharrirni to'xtatish")
+async def stop_constructor(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("🔄 Muharrir to'xtatildi. Oddiy rejim faol.", reply_markup=get_user_reply_menu(message.from_user.id))
+
+# --- 📝 XABARLAR MUHARRIRI (`6684.jpg` dagi kabi) ---
+
+@dp.message(F.text == "📝 Xabar tahrirlash", F.from_user.id == ADMIN_ID)
+@dp.message(F.text == "📝 Xabar muharriri", F.from_user.id == ADMIN_ID)
+async def messages_edit_mode(message: types.Message, state: FSMContext):
+    await state.set_state(AdminStates.editing_messages)
+    
+    kb = ReplyKeyboardBuilder()
+    kb.button(text="➕ Xabar Qo'shish")
+    kb.button(text="🔄 Muharrirda sahifalash (10)")
+    kb.button(text="⚙️ Tugmalar muharriri")
+    kb.button(text="🛑 Muharrirni to'xtatish")
+    kb.adjust(1, 1, 2)
+    
+    await message.answer("🔧 **You are in Messages Editing mode.**", reply_markup=kb.as_markup(resize_keyboard=True))
+
+# --- FOYDALANUVChI SO'ROVLARI VA ASOSIY FUNKSIYALAR ---
+
 @dp.message()
-async def main_message_processor(message: types.Message):
+async def main_bot_processor(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    
-    # Har qanday amal oldidan obunani tekshirish
-    if not await is_subscribed(user_id):
-        await message.answer("Iltimos, botdan foydalanish uchun avval kanalga a'zo bo'ling! Yangilash uchun /start bosing.")
-        return
-
     text = message.text
 
-    # 1. KINO QIDIRISH (Agar foydalanuvchi faqat son yuborgan bo'lsa)
-    if text.isdigit():
-        msg = await message.answer("🔍 Kino qidirilmoqda, iltimos kuting...")
-        try:
-            # Kanaldan ko'rsatilgan ID dagi xabarni foydalanuvchiga forward qiladi
-            await bot.forward_message(chat_id=message.chat.id, from_chat_id=CHANNEL_ID, message_id=int(text))
-            await msg.delete()
-        except Exception as e:
-            await msg.edit_text("ℹ️ Ushbu kod ostida kino topilmadi yoki bot kanalda administrator huquqiga ega emas.")
-            logging.error(f"Kino forward qilishda xato: {e}")
+    # Obunani majburiy tekshirish
+    if not await is_subscribed(user_id):
+        await message.answer("Iltimos, avval ommaviy kanalga a'zo bo'ling! /start tugmasini bosing.")
         return
 
-    # 2. AI RASM CHIZISH (Agar xabar 'rasm:' so'zi bilan boshlansa)
+    # Sobiq koddagi funksiyalar (Tugmalar bosilganda ishlaydi)
+    if text in ["🎬 Kino Qidirish", "🎬 Search Movie", "🎬 Поиск Кино"]:
+        await message.answer("🎬 **MoviTime Tizimi**\n\nKino topish uchun o'sha kinoning kodini (faqat raqam o'zini) yozib yuboring.")
+        return
+        
+    elif text in ["🤖 Gemini AI Chat"]:
+        await message.answer("🤖 **Gemini AI Chat**\n\nMenga xohlagan matnli savolingizni kiriting yoki rasm chizish uchun `rasm: ko'rinish tavsifi` ko'rinishida yozing.")
+        return
+        
+    elif text in ["🎵 Musiqa Markazi", "🎵 Music Center", "🎵 Музыкальный Центр"]:
+        await message.answer("🎵 **Musiqa Markazi**\n\nQo'shiq nomini `musiqa: qo'shiq nomi` shaklida yozib yuboring.")
+        return
+
+    # 1. KINO QIDIRISH TIZIMI (Faqat raqamlar yuborilganda)
+    if text.isdigit():
+        msg = await message.answer("🔍 Serverdan qidirilmoqda...")
+        try:
+            await bot.forward_message(chat_id=message.chat.id, from_chat_id=SERVER_CHANNEL, message_id=int(text))
+            await msg.delete()
+        except Exception:
+            await msg.edit_text("ℹ️ Ushbu kod ostida hech narsa topilmadi.")
+        return
+
+    # 2. AI RASM CHIZISH PROMPT'I
     if text.lower().startswith("rasm:"):
         prompt = text[5:].strip()
-        if not prompt:
-            await message.answer("Rasm chizish uchun tasvirni yozing. Masalan: `rasm: Kosmosdagi robot`")
-            return
-            
-        msg = await message.answer("🎨 Gemini AI tasvirni chizmoqda, kuting...")
+        msg = await message.answer("🎨 Tasvir yaratilmoqda...")
         if ai_client:
             try:
-                # Gemini Imagen modeli orqali rasm generatsiya qilish
-                result = ai_client.models.generate_images(
-                    model='imagen-3.0-generate-002',
-                    prompt=prompt,
-                    config=dict(number_of_images=1)
-                )
-                for generated_image in result.generated_images:
-                    image_bytes = generated_image.image.image_bytes
-                    input_file = types.BufferedInputFile(image_bytes, filename="ai_artwork.jpg")
-                    await bot.send_photo(chat_id=message.chat.id, photo=input_file, caption=f"🎨 Sizning so'rovingiz: {prompt}")
+                result = ai_client.models.generate_images(model='imagen-3.0-generate-002', prompt=prompt, config=dict(number_of_images=1))
+                for gen_img in result.generated_images:
+                    file_input = types.BufferedInputFile(gen_img.image.image_bytes, filename="ai.jpg")
+                    await bot.send_photo(chat_id=message.chat.id, photo=file_input, caption=f"🎨 Tavsif: {prompt}")
                 await msg.delete()
-            except Exception as e:
-                await msg.edit_text("❌ Rasm chizish jarayonida xatolik yuz berdi.")
-                logging.error(f"Imagen error: {e}")
-        else:
-            await msg.edit_text("🤖 AI tizimi ulanmagan. GEMINI_API_KEY sozlamalarini tekshiring.")
+            except Exception:
+                await msg.edit_text("❌ Rasm yaratishda xatolik.")
         return
 
-    # 3. MUSIQA QIDIRISH (VK Music uslubida chiroyli inline ro'yxat)
-    # Ushbu qism namuna sifatida chiroyli interfeys interaktivligini ta'minlaydi
-    if "musila" in text.lower() or "qo'shiq" in text.lower() or len(text) < 15:
-        # Haqiqiy ma'lumotlar bazasi yoki api ulanmagan bo'lsa, qidiruv natijasi interfeysini rasmga moslab chiqaramiz
+    # 3. MUSIQA INTERFEYSI (`musiqa:`)
+    if text.lower().startswith("musiqa:"):
+        query = text[8:].strip()
         kb = InlineKeyboardBuilder()
-        for i in range(1, 9):
-            kb.button(text=str(i), callback_data=f"play_track_{i}")
-        kb.button(text="⬅️", callback_data="music_prev")
-        kb.button(text="❌", callback_data="music_close")
-        kb.button(text="➡️", callback_data="music_next")
-        kb.adjust(4, 4, 3)
-        
-        await message.answer(
-            f"🔍 **Qidiruv natijalari: {text}**\n\n"
-            f"1. {text} - Original Mix [03:45]\n"
-            f"2. {text} - Slowed Reverb [04:12]\n"
-            f"3. {text} - Remix Version [02:50]\n"
-            f"4. {text} - TikTok Trend [03:10]\n\n"
-            f"Natijalar 1-4 / 1000. Eshitish uchun quyidagi raqamlarni bosing:",
-            reply_markup=kb.as_markup()
-        )
+        for i in range(1, 5):
+            kb.button(text=f"🎵 {i}-Musiqa", callback_data=f"vkm_play_{100+i}")
+        kb.adjust(2)
+        await message.answer(f"🔍 **Qidiruv natijalari: {query}**\n\nKerakli raqamni tanlang:", reply_markup=kb.as_markup())
         return
 
-    # 4. GEMINI AI MATNLI CHAT (Boshqa barcha holatlarda)
+    # 4. CHAT BOT (GEMINI AI SAVOL-JAVOB)
     if ai_client:
-        msg = await message.answer("🤔 O'ylayapman...")
         try:
-            response = ai_client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=text,
-            )
-            await msg.edit_text(response.text)
-        except Exception as e:
-            await msg.edit_text("❌ Tizim javob berishda xatoga duch keldi.")
-            logging.error(f"Gemini Text error: {e}")
-    else:
-        await message.answer("🤖 Sun'iy intellekt moduli faollashtirilmagan.")
+            response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=text)
+            await message.answer(response.text)
+        except Exception:
+            await message.answer("🤖 Hozircha javob berishda muammo yuzaga keldi.")
 
-# Musiqa tugmalari bosilganda ishlaydigan namuna handler
-@dp.callback_query(F.data.startswith("play_track_"))
-async def play_track_callback(callback: types.CallbackQuery):
-    track_num = callback.data.split("_")[2]
-    await callback.answer(f"🎵 {track_num}-raqamli qo'shiq yuklanmoqda...", show_alert=False)
-
-@dp.callback_query(F.data == "music_close")
-async def close_music_callback(callback: types.CallbackQuery):
+# Musiqani yuborish handler'i
+@dp.callback_query(F.data.startswith("vkm_play_"))
+async def play_music(callback: types.CallbackQuery):
+    msg_id = int(callback.data.split("_")[2])
     try:
-        await callback.message.delete()
+        await bot.forward_message(chat_id=callback.message.chat.id, from_chat_id=SERVER_CHANNEL, message_id=msg_id)
     except Exception:
-        pass
+        await callback.answer("❌ Fayl topilmadi.", show_alert=True)
 
-# Serverni doimiy eshitish rejimida ishga tushirish
+# Botni ishga tushirish
 async def main():
-    logging.info("Mega Portal Bot muvaffaqiyatli ishga tushdi!")
+    logging.info("Visual Constructor va barcha funksiyalar yuklandi!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
