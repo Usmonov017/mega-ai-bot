@@ -1,4 +1,4 @@
-import os
+import os  # Kichik harf bilan to'g'rilandi
 import logging
 import asyncio
 from aiogram import Bot, Dispatcher, types, F
@@ -44,7 +44,6 @@ async def start_handler(message: types.Message):
     # Birinchi navbatda Ommaviy kanalga obunani tekshiramiz
     if not await is_subscribed(user_id):
         kb = InlineKeyboardBuilder()
-        # Agar kanal ID bo'lsa havolasini to'g'rilaymiz, agar @username bo'lsa to'g'ridan-to'g'ri qo'yamiz
         if str(PUBLIC_CHANNEL).startswith("-100"):
             clean_channel = str(PUBLIC_CHANNEL).replace('-100', '')
             channel_url = f"https://t.me/c/{clean_channel}"
@@ -96,7 +95,7 @@ async def navigation_callback(callback: types.CallbackQuery):
     elif section == "ai":
         await callback.message.answer("🤖 **Gemini AI Chat**\n\nMenga xohlagan matnli savolingizni yozing yoki rasm chizdirish uchun matn boshiga `rasm:` so'zini qo'shib yozing.")
     elif section == "music":
-        await callback.message.answer("🎵 **Musiqa Bo'limi**\n\nIzlayotgan qo'shig'ingiz yoki ijrochi nomini yozib yuboring.")
+        await callback.message.answer("🎵 **Musiqa Bo'limi**\n\nIzlayotgan qo'shig'ingiz yoki ijrochi nomini yozib yuboring (masalan, `musiqa: Janob Rasul`).")
     
     await callback.answer()
 
@@ -116,7 +115,6 @@ async def main_message_processor(message: types.Message):
     if text.isdigit():
         msg = await message.answer("🔍 Kino serverdan qidirilmoqda...")
         try:
-            # Kinoni yopiq SERVER_CHANNEL dan foydalanuvchiga forward qiladi
             await bot.forward_message(chat_id=message.chat.id, from_chat_id=SERVER_CHANNEL, message_id=int(text))
             await msg.delete()
         except Exception as e:
@@ -151,8 +149,13 @@ async def main_message_processor(message: types.Message):
             await msg.edit_text("🤖 AI tizimi ulanmagan. GEMINI_API_KEY sozlamalarini tekshiring.")
         return
 
-    # 3. MUSIQA QIDIRISH (VK Music uslubida inline tugmalar)
-    if "musila" in text.lower() or "qo'shiq" in text.lower() or len(text) < 15:
+    # 3. MUSIQA QIDIRISH (Agar xabar 'musiqa:' bilan boshlansa)
+    if text.lower().startswith("musiqa:"):
+        search_query = text[8:].strip()
+        if not search_query:
+            await message.answer("Musiqa izlash uchun nomini yozing. Masalan: `musiqa: Sherali Jo'rayev`")
+            return
+
         kb = InlineKeyboardBuilder()
         for i in range(1, 9):
             kb.button(text=str(i), callback_data=f"play_track_{i}")
@@ -162,11 +165,11 @@ async def main_message_processor(message: types.Message):
         kb.adjust(4, 4, 3)
         
         await message.answer(
-            f"🔍 **Qidiruv natijalari: {text}**\n\n"
-            f"1. {text} - Original Mix [03:45]\n"
-            f"2. {text} - Slowed Reverb [04:12]\n"
-            f"3. {text} - Remix Version [02:50]\n"
-            f"4. {text} - TikTok Trend [03:10]\n\n"
+            f"🔍 **Qidiruv natijalari: {search_query}**\n\n"
+            f"1. {search_query} - Original Mix [03:45]\n"
+            f"2. {search_query} - Slowed Reverb [04:12]\n"
+            f"3. {search_query} - Remix Version [02:50]\n"
+            f"4. {search_query} - TikTok Trend [03:10]\n\n"
             f"Natijalar 1-4. Eshitish uchun quyidagi raqamlarni bosing:",
             reply_markup=kb.as_markup()
         )
