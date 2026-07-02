@@ -46,7 +46,7 @@ class AdminStates(StatesGroup):
 
 # --- YORDAMChI FUNKSIYALAR ---
 async def is_subscribed(user_id: int) -> bool:
-    if not PUBLIC_CHANNEL: @MoviTimeUz
+    if not PUBLIC_CHANNEL:
         return True
     try:
         member = await bot.get_chat_member(chat_id=PUBLIC_CHANNEL, user_id=user_id)
