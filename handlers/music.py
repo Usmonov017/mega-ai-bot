@@ -13,11 +13,6 @@ class UserStates(StatesGroup):
     searching_music = State()
 
 async def search_vk_style_music(query: str):
-    """ 
-    VK Music Bot kabi o'zbekcha va ruscha qo'shiqlarni 
-    ochiq bazadan muammosiz va bloklarsiz qidirish
-    """
-    # Jamlangan ochiq musiqa bazasi (Deezer va muqobil VK API portlari asosida)
     url = f"https://api.deezer.com/search?q={query}&limit=6"
     try:
         async with aiohttp.ClientSession() as session:
@@ -28,7 +23,7 @@ async def search_vk_style_music(query: str):
                     for track in data.get('data', []):
                         results.append({
                             'title': f"{track['artist']['name']} - {track['title']}",
-                            'url': track['preview'],  # Tayyor mp3 havola
+                            'url': track['preview'],
                             'duration': track['duration']
                         })
                     return results
@@ -59,7 +54,6 @@ async def process_music_search(message: types.Message, state: FSMContext):
     response_text = f"🔍 **'{query}' bo'yicha topilgan musiqalar:**\n\n"
     kb = InlineKeyboardBuilder()
     
-    # Rasmdagi kabi tartiblangan ro'yxat chiqarish
     for idx, song in enumerate(songs, start=1):
         minut = song['duration'] // 60
         sekund = song['duration'] % 60
@@ -67,7 +61,7 @@ async def process_music_search(message: types.Message, state: FSMContext):
         kb.button(text=str(idx), callback_data=f"vkm_download_{idx}")
         
     kb.button(text="❌ Yopish", callback_data="vkm_close")
-    kb.adjust(3, 3, 1) # Tugmalarni 3 tadan qilib chiroyli tartiblaydi
+    kb.adjust(3, 3, 1)
     
     await status_msg.delete()
     await message.answer(response_text, reply_markup=kb.as_markup())
@@ -84,11 +78,10 @@ async def download_music(callback: types.CallbackQuery):
         return
         
     selected_song = songs[idx]
-    await callback.message.answer(f"📥 **{selected_song['title']}** yuklanmoqda va uzatilmoqda...")
+    await callback.message.answer(f"📥 **{selected_song['title']}** yuklanmoqda...")
     await bot.send_chat_action(chat_id=callback.message.chat.id, action="upload_voice")
     
     try:
-        # Faylni yuklab o'tirmasdan, URL orqali silliq yuborish
         audio_file = types.URLInputFile(selected_song['url'], filename=f"{selected_song['title']}.mp3")
         await bot.send_audio(
             chat_id=callback.message.chat.id, 
