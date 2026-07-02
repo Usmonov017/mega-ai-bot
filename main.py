@@ -8,6 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from google import genai
+import yt_dlp
 
 logging.basicConfig(level=logging.INFO)
 
@@ -16,7 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 PUBLIC_CHANNEL = os.getenv("PUBLIC_CHANNEL", "@MoviTimeUz")
 SERVER_CHANNEL = os.getenv("SERVER_CHANNEL", "@MoviTimeUz")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))  # O'zingizning ID raqamingizni yozing
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -42,21 +43,47 @@ MEMORY_DB = {
         "tg": ["🎬 Ҷустуҷӯи Кино", "🤖 Gemini AI Chat", "🎵 Маркази Мусиқӣ"],
         "ky": ["🎬 Кино Издөө", "🤖 Gemini AI Chat", "🎵 Музыка Борбору"],
         "tk": ["🎬 Kino Gözleg", "🤖 Gemini AI Chat", "🎵 Saz Merkezi"]
-    }
+    },
+    "temp_music": {} # Qidiruv natijalarini vaqtincha saqlash uchun
 }
 
 class AdminStates(StatesGroup):
     editing_buttons = State()
     adding_button = State()
 
+class UserStates(StatesGroup):
+    searching_music = State()
+
+# --- INTERNETDAN QIDIRISH (TEKIN API) ---
+def search_youtube_music(query: str):
+    """ Kalitsiz ochiq API: Internetdan musiqalarni qidirish """
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'noplaylist': True,
+        'quiet': True,
+        'default_search': 'ytsearch3', # 3 ta eng mos musiqani topadi
+    }
+    results = []
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(query, download=False)
+            if 'entries' in info:
+                for entry in info['entries']:
+                    results.append({
+                        'title': entry.get('title'),
+                        'url': entry.get('webpage_url'),
+                        'duration': entry.get('duration')
+                    })
+        except Exception as e:
+            logging.error(f"Musiqa qidirishda xato: {e}")
+    return results
+
 async def is_subscribed(user_id: int) -> bool:
-    if not PUBLIC_CHANNEL:
-        return True
+    if not PUBLIC_CHANNEL: return True
     try:
         member = await bot.get_chat_member(chat_id=PUBLIC_CHANNEL, user_id=user_id)
         return member.status in ["member", "administrator", "creator"]
-    except Exception:
-        return False
+    except: return False
 
 def get_user_lang(user_id: int) -> str:
     return MEMORY_DB["users"].get(user_id, {}).get("lang", "uz")
@@ -103,116 +130,136 @@ async def set_language(callback: types.CallbackQuery):
     await callback.answer(f"✓ {ALL_LANGUAGES.get(lang)}", show_alert=False)
     await callback.message.answer(f"🤖 Menyu:", reply_markup=get_user_reply_menu(user_id))
 
-@dp.message(F.text == "⚙️ Tugmalar muharriri", F.from_user.id == ADMIN_ID)
-async def admin_mode_start(message: types.Message, state: FSMContext):
-    await state.set_state(AdminStates.editing_buttons)
-    kb = ReplyKeyboardBuilder()
-    kb.button(text="➕ Tugma Qo'shish")
-    kb.button(text="🛑 Muharrirni to'xtatish")
-    kb.adjust(1)
-    await message.answer("🔧 **Tugmalarni tahrirlash rejimi faollashdi.**", reply_markup=kb.as_markup(resize_keyboard=True))
+# --- MUSIQA APISINI IShLATISh TIZIMI ---
 
-@dp.message(F.text == "➕ Tugma Qo'shish", AdminStates.editing_buttons)
-async def add_button_prompt(message: types.Message, state: FSMContext):
-    await state.set_state(AdminStates.adding_button)
-    await message.answer("📝 Yangi tugma nomini yuboring:")
+@dp.message(F.text.in_(["🎵 Musiqa Markazi", "🎵 Music Center", "🎵 Музыкальный Центр", "🎵 Musiqi Mərkəzi", "🎵 Müzik Merkezi", "🎵 Музыка Орталығы", "🎵 Маркази Мусиқӣ", "🎵 Музыка Борбору", "🎵 Saz Merkezi"]))
+async def music_mode_activate(message: types.Message, state: FSMContext):
+    await state.set_state(UserStates.searching_music)
+    await message.answer("🎵 **Musiqa qidirish tizimi ishga tushdi.**\n\nQo'shiq nomi yoki ijrochini yozing:")
 
-@dp.message(AdminStates.adding_button)
-async def add_button_save(message: types.Message, state: FSMContext):
-    btn_name = message.text
-    lang = get_user_lang(message.from_user.id)
-    if btn_name not in MEMORY_DB["buttons"][lang]:
-        MEMORY_DB["buttons"][lang].append(btn_name)
-    await state.set_state(AdminStates.editing_buttons)
-    await message.answer(f"✅ Qo'shildi!", reply_markup=get_user_reply_menu(message.from_user.id))
+@dp.message(UserStates.searching_music)
+async def process_music_search(message: types.Message, state: FSMContext):
+    query = message.text
+    status_msg = await message.answer("🔍 Internet bazasidan qidirilmoqda...")
+    
+    # API orqali qidirish funksiyasini chaqiramiz
+    loop = asyncio.get_event_loop()
+    songs = await loop.run_in_executor(None, search_youtube_music, query)
+    
+    if not songs:
+        await status_msg.edit_text("ℹ️ Hech qanday musiqa topilmadi. Boshqa nom yozib ko'ring.")
+        return
 
-@dp.message(F.text == "🛑 Muharrirni to'xtatish")
-async def stop_constructor(message: types.Message, state: FSMContext):
+    # Vaqtincha xotiraga saqlab turamiz (foydalanuvchi tugmani bosganda yuklash uchun)
+    user_id = message.from_user.id
+    MEMORY_DB["temp_music"][user_id] = songs
+
+    response_text = f"🔍 **'{query}' bo'yicha topilgan musiqalar:**\n\n"
+    kb = InlineKeyboardBuilder()
+    
+    for idx, song in enumerate(songs, start=1):
+        minut = song['duration'] // 60
+        sekund = song['duration'] % 60
+        response_text += f"{idx}. 🎵 {song['title']} [{minut}:{sekund:02d}]\n"
+        kb.button(text=str(idx), callback_data=f"vkm_download_{idx}")
+        
+    kb.button(text="❌ Yopish", callback_data="vkm_close")
+    kb.adjust(3, 1)
+    
+    await status_msg.delete()
+    await message.answer(response_text, reply_markup=kb.as_markup())
     await state.clear()
-    await message.answer("🔄 Oddiy rejim faol.", reply_markup=get_user_reply_menu(message.from_user.id))
 
-# --- 🔥 ASOSIY MATN PROSESSORI TIZIMI ---
+# Musiqani (.mp3) yuklab yuborish handler'i
+@dp.callback_query(F.data.startswith("vkm_download_"))
+async def download_and_send_music(callback: types.CallbackQuery):
+    idx = int(callback.data.split("_")[2]) - 1
+    user_id = callback.from_user.id
+    
+    songs = MEMORY_DB["temp_music"].get(user_id)
+    if not songs or idx >= len(songs):
+        await callback.answer("❌ Seans muddati tugagan. Qaytadan qidiring.", show_alert=True)
+        return
+        
+    selected_song = songs[idx]
+    await callback.message.answer(f"📥 **{selected_song['title']}** yuklab olinmoqda, iltimos kuting...")
+    await bot.send_chat_action(chat_id=callback.message.chat.id, action="upload_voice")
 
+    # Audio faylni vaqtincha yuklash sozlamalari
+    outtmpl = f"downloads/{user_id}_%(id)s.%(ext)s"
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': outtmpl,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True
+    }
+    
+    try:
+        loop = asyncio.get_event_loop()
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Faylni internetdan yuklab olamiz
+            info = await loop.run_in_executor(None, ydl.extract_info, selected_song['url'], True)
+            filename = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
+            
+            # Telegramga audio fayl qilib yuboramiz
+            audio_file = types.FSInputFile(filename)
+            await bot.send_audio(
+                chat_id=callback.message.chat.id, 
+                audio=audio_file, 
+                title=selected_song['title'],
+                performer="Musiqa Markazi Bot"
+            )
+            # Server xotirasini to'ldirmaslik uchun faylni darrov o'chiramiz
+            if os.path.exists(filename):
+                os.remove(filename)
+    except Exception as e:
+        logging.error(f"Yuklashda xato: {e}")
+        await callback.message.answer("❌ Kechirasiz, ushbu audioni yuklash imkoni bo'lmadi.")
+
+@dp.callback_query(F.data == "vkm_close")
+async def close_music_menu(callback: types.CallbackQuery):
+    await callback.message.delete()
+
+# --- QOLGAN ASOSIY PROSESSORLAR (Kino va Rasm) ---
 @dp.message()
 async def main_bot_processor(message: types.Message):
     user_id = message.from_user.id
     text = message.text
 
-    if not await is_subscribed(user_id):
-        await message.answer("Iltimos, avval kanalga a'zo bo'ling! /start")
+    if text.lower().startswith("rasm:"):
+        prompt = text[5:].strip()
+        await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+        try:
+            result = ai_client.models.generate_images(model='imagen-3.0-generate-002', prompt=prompt, config=dict(number_of_images=1))
+            for gen_img in result.generated_images:
+                file_input = types.BufferedInputFile(gen_img.image.image_bytes, filename="ai_image.jpg")
+                await bot.send_photo(chat_id=message.chat.id, photo=file_input, caption=f"🎨 **Tasvir:** `{prompt}`")
+        except Exception:
+            await message.answer("❌ Rasm chizishda xatolik.")
         return
 
-    all_movie_buttons = ["🎬 Kino Qidirish", "🎬 Search Movie", "🎬 Поиск Кино", "🎬 Kino Axtarış", "🎬 Film Ara", "🎬 Кино Іздеу", "🎬 Ҷустуҷӯи Кино", "🎬 Кино Издөө", "🎬 Kino Gözleg"]
-    all_ai_buttons = ["🤖 Gemini AI Chat"]
-    all_music_buttons = ["🎵 Musiqa Markazi", "🎵 Music Center", "🎵 Музыкальный Центр", "🎵 Musiqi Mərkəzi", "🎵 Müzik Merkezi", "🎵 Музыка Орталығы", "🎵 Маркази Мусиқӣ", "🎵 Музыка Борбору", "🎵 Saz Merkezi"]
-
-    if text in all_movie_buttons:
-        await message.answer("🎬 **Kino Tizimi**\n\nKino olish uchun uning kodini (faqat raqam o'zini) yuboring.")
-        return
-    elif text in all_ai_buttons:
-        await message.answer("🤖 **Gemini AI**\n\nMenga savol yo'llang yoki rasm chizish uchun `rasm: xohlagan tasviringiz` ko'rinishida yozing.")
-        return
-    elif text in all_music_buttons:
-        await message.answer("🎵 **Musiqa Markazi**\n\nQo'shiq qidirish uchun `musiqa: qo'shiq nomi` shaklida yozing.")
-        return
-
-    # A. KINO KODINI TEKSHIRISH (Faqat raqam bo'lsa)
     if text.isdigit():
         try:
             await bot.forward_message(chat_id=message.chat.id, from_chat_id=SERVER_CHANNEL, message_id=int(text))
-        except Exception:
-            await message.answer("ℹ️ Bunday kodli film topilmadi.")
+        except:
+            await message.answer("ℹ️ Film topilmadi.")
         return
 
-    # B. 🎨 RASM CHIZISH PROMPT'I (Gemini matn modelidan tepada turishi shart!)
-    if text.lower().startswith("rasm:"):
-        prompt = text[5:].strip()
-        if not ai_client:
-            await message.answer("❌ Gemini API kaliti sozlanmagan.")
-            return
-        
-        await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
-        try:
-            result = ai_client.models.generate_images(
-                model='imagen-3.0-generate-002',
-                prompt=prompt,
-                config=dict(number_of_images=1)
-            )
-            for gen_img in result.generated_images:
-                file_input = types.BufferedInputFile(gen_img.image.image_bytes, filename="ai_image.jpg")
-                await bot.send_photo(chat_id=message.chat.id, photo=file_input, caption=f"🎨 **Siz so'ragan tasvir:**\n`{prompt}`")
-            return
-        except Exception as e:
-            logging.error(f"Rasm chizishda xato: {e}")
-            await message.answer("❌ Tasvirni chizishda xatolik yuz berdi. Promptni boshqacharoq yozib ko'ring.")
-            return
-
-    # C. 🎵 MUSIQA QIDIRISH SIMULATSIYASI
-    if text.lower().startswith("musiqa:"):
-        query = text[8:].strip()
-        kb = InlineKeyboardBuilder()
-        # Namuna uchun tugmalar (buni kengaytirish mumkin)
-        kb.button(text="🎵 1-Variant", callback_data="vkm_play_1")
-        kb.button(text="🎵 2-Variant", callback_data="vkm_play_2")
-        kb.adjust(2)
-        await message.answer(f"🔍 **'{query}' bo'yicha topilgan musiqalar:**", reply_markup=kb.as_markup())
-        return
-
-    # D. 💬 ODDIY CHAT BOT (GEMINI AI MATN MODELI)
     if ai_client:
+        await bot.send_chat_action(chat_id=message.chat.id, action="typing")
         try:
-            await bot.send_chat_action(chat_id=message.chat.id, action="typing")
             response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=text)
             await message.answer(response.text)
-        except Exception:
+        except:
             await message.answer("💬 ...")
 
-@dp.callback_query(F.data.startswith("vkm_play_"))
-async def play_music(callback: types.CallbackQuery):
-    await callback.answer("🎵 Musiqa yuklanmoqda...", show_alert=False)
-    await callback.message.answer("ℹ️ Musiqa server bazasidan qidirilmoqda. To'liq integratsiya uchun musiqa bazasi ulanishi kerak.")
-
 async def main():
+    if not os.path.exists("downloads"):
+        os.makedirs("downloads")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
