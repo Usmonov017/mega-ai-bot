@@ -34,7 +34,7 @@ async def search_vk_style_music(query: str):
 @router.message(F.text.in_(["🎵 Musiqa Markazi", "🎵 Music Center", "🎵 Музыкальный Центр"]))
 async def music_mode_activate(message: types.Message, state: FSMContext):
     await state.set_state(UserStates.searching_music)
-    await message.answer("🎵 **VK Music qidiruv tizimi faol!**\n\nQo'shiq nomi yoki ijrochini yozing (Masalan: *Yulduz Usmonova*):")
+    await message.answer("🎵 **VK Music qidiruv tizimi faol!**\n\nQo'shiq nomi yoki ijrochini yozing (Masalan: *Qadinim*):")
 
 @router.message(UserStates.searching_music)
 async def process_music_search(message: types.Message, state: FSMContext):
