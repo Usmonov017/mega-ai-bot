@@ -2,7 +2,7 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardButtonBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 import config
 from loader import bot, MEMORY_DB
 
@@ -22,7 +22,7 @@ async def is_subscribed(user_id: int) -> bool:
 
 def get_user_reply_menu(user_id: int):
     lang = MEMORY_DB.get("users", {}).get(user_id, {}).get("lang", "uz")
-    builder = ReplyKeyboardButtonBuilder()
+    builder = ReplyKeyboardBuilder()
     buttons = MEMORY_DB.get("buttons", {}).get(lang, MEMORY_DB["buttons"]["en"])
     for btn in buttons:
         builder.button(text=btn)
