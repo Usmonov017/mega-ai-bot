@@ -243,13 +243,23 @@ async def main_bot_processor(message: types.Message):
             pass
     elif text == "🤖 Gemini AI Chat":
         await message.answer("🤖 Menga xohlagan savolingizni yozing yoki rasm chizish uchun `rasm: ` deb yozing.")
-
 # --- BOTNI ISHGA TUSHIRISH ---
+
+async def handle(request):
+    return aiohttp.web.Response(text="Bot is running successfully!")
+
 async def main():
-    print("🚀 Mega Bot ishga tushdi!")
+    # Render port tekshiruvidan o'tish uchun kichik veb-server
+    app = aiohttp.web.Application()
+    app.router.add_get('/', handle)
+    runner = aiohttp.web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = aiohttp.web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    
+    print("🚀 Mega Bot muvaffaqiyatli ishga tushdi!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-```
